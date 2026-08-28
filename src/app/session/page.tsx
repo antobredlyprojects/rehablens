@@ -2,168 +2,74 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import Link from "next/link";
-import {
-  EXERCISES,
-  getEncouragingMessage,
-} from "@/lib/exercises";
+import { EXERCISES, getEncouragingMessage } from "@/lib/exercises";
 import { loadState, saveState, addSession } from "@/lib/storage";
-import {
-  FeedbackMessage,
-  FeedbackType,
-  ExerciseDefinition,
-} from "@/lib/types";
-import {
-  calculateAngle,
-  analyzeForm,
-  detectFormIssues,
-  SKELETON_CONNECTIONS,
-} from "@/lib/poseUtils";
-
-// Simulated pose detection for hackathon demo
-// In production, this would use TensorFlow.js MoveNet
-function simulateKeypoints(
-  frame: number,
-  exercise: ExerciseDefinition
-): Map<string, { x: number; y: number; score: number }> {
-  const map = new Map<string, { x: number; y: number; score: number }>();
-  const t = frame * 0.05;
-  const base = Math.sin(t) * 0.5 + 0.5; // 0 to 1 oscillation
-
-  // Head
-  map.set("nose", { x: 0.5, y: 0.15, score: 0.98 });
-  map.set("left_eye", { x: 0.48, y: 0.13, score: 0.97 });
-  map.set("right_eye", { x: 0.52, y: 0.13, score: 0.97 });
-  map.set("left_ear", { x: 0.46, y: 0.15, score: 0.95 });
-  map.set("right_ear", { x: 0.54, y: 0.15, score: 0.95 });
-
-  // Shoulders
-  map.set("left_shoulder", { x: 0.42, y: 0.28, score: 0.96 });
-  map.set("right_shoulder", { x: 0.58, y: 0.28, score: 0.96 });
-
-  // Arms (slightly moving)
-  map.set("left_elbow", {
-    x: 0.35 + base * 0.05,
-    y: 0.38 + base * 0.02,
-    score: 0.94,
-  });
-  map.set("right_elbow", {
-    x: 0.65 - base * 0.05,
-    y: 0.38 + base * 0.02,
-    score: 0.94,
-  });
-  map.set("left_wrist", {
-    x: 0.32 + base * 0.03,
-    y: 0.48 + base * 0.03,
-    score: 0.9,
-  });
-  map.set("right_wrist", {
-    x: 0.68 - base * 0.03,
-    y: 0.48 + base * 0.03,
-    score: 0.9,
-  });
-
-  // Hips
-  map.set("left_hip", { x: 0.44, y: 0.52, score: 0.95 });
-  map.set("right_hip", { x: 0.56, y: 0.52, score: 0.95 });
-
-  // Legs — exercise-dependent movement
-  if (
-    exercise.id === "knee-flexion" ||
-    exercise.id === "hip-extension"
-  ) {
-    // Right leg bending
-    const bend = base * 0.12;
-    map.set("left_knee", { x: 0.43, y: 0.68, score: 0.93 });
-    map.set("right_knee", {
-      x: 0.56 + bend,
-      y: 0.66 - bend * 0.5,
-      score: 0.93,
-    });
-    map.set("left_ankle", { x: 0.43, y: 0.85, score: 0.91 });
-    map.set("right_ankle", {
-      x: 0.56 + bend * 0.5,
-      y: 0.85,
-      score: 0.91,
-    });
-  } else if (exercise.id === "ankle-dorsiflexion") {
-    map.set("left_knee", { x: 0.43, y: 0.68, score: 0.93 });
-    map.set("right_knee", { x: 0.56, y: 0.68, score: 0.93 });
-    map.set("left_ankle", { x: 0.43, y: 0.85, score: 0.91 });
-    map.set("right_ankle", {
-      x: 0.56,
-      y: 0.85 - base * 0.03,
-      score: 0.91,
-    });
-  } else {
-    map.set("left_knee", { x: 0.43, y: 0.68, score: 0.93 });
-    map.set("right_knee", { x: 0.56, y: 0.68, score: 0.93 });
-    map.set("left_ankle", { x: 0.43, y: 0.85, score: 0.91 });
-    map.set("right_ankle", { x: 0.56, y: 0.85, score: 0.91 });
-  }
-
-  return map;
-}
+import { FeedbackType, ExerciseDefinition } from "@/lib/types";
+import { calculateAngle, analyzeForm, SKELETON_CONNECTIONS } from "@/lib/poseUtils";
+import { useCamera } from "@/hooks/useCamera";
+import { usePoseDetection, PoseResult, PoseKeypoint } from "@/hooks/usePoseDetection";
 
 function getAngleForExercise(
   exerciseId: string,
-  keypoints: Map<string, { x: number; y: number; score: number }>
+  keypoints: Map<string, PoseKeypoint>
 ): { angle: number; jointName: string } | null {
   const get = (name: string) => keypoints.get(name);
+  const minScore = 0.3;
 
   switch (exerciseId) {
     case "knee-flexion": {
-      const hip = get("right_hip") || get("left_hip");
-      const knee = get("right_knee") || get("left_knee");
-      const ankle = get("right_ankle") || get("left_ankle");
-      if (hip && knee && ankle)
-        return {
-          angle: Math.round(calculateAngle(hip, knee, ankle)),
-          jointName: "Knee Angle",
-        };
+      // Try right side first, then left
+      for (const side of ["right", "left"]) {
+        const hip = get(`${side}_hip`);
+        const knee = get(`${side}_knee`);
+        const ankle = get(`${side}_ankle`);
+        if (hip && knee && ankle && hip.score > minScore && knee.score > minScore && ankle.score > minScore) {
+          return { angle: Math.round(calculateAngle(hip, knee, ankle)), jointName: "Knee Angle" };
+        }
+      }
       break;
     }
     case "shoulder-abduction": {
-      const elbow = get("right_elbow") || get("left_elbow");
-      const shoulder = get("right_shoulder") || get("left_shoulder");
-      const hip = get("right_hip") || get("left_hip");
-      if (elbow && shoulder && hip)
-        return {
-          angle: Math.round(calculateAngle(elbow, shoulder, hip)),
-          jointName: "Shoulder Angle",
-        };
+      for (const side of ["right", "left"]) {
+        const elbow = get(`${side}_elbow`);
+        const shoulder = get(`${side}_shoulder`);
+        const hip = get(`${side}_hip`);
+        if (elbow && shoulder && hip && elbow.score > minScore && shoulder.score > minScore && hip.score > minScore) {
+          return { angle: Math.round(calculateAngle(elbow, shoulder, hip)), jointName: "Shoulder Angle" };
+        }
+      }
       break;
     }
     case "hip-extension": {
-      const shoulder = get("right_shoulder") || get("left_shoulder");
-      const hip = get("right_hip") || get("left_hip");
-      const knee = get("right_knee") || get("left_knee");
-      if (shoulder && hip && knee)
-        return {
-          angle: Math.round(calculateAngle(shoulder, hip, knee)),
-          jointName: "Hip Angle",
-        };
+      for (const side of ["right", "left"]) {
+        const shoulder = get(`${side}_shoulder`);
+        const hip = get(`${side}_hip`);
+        const knee = get(`${side}_knee`);
+        if (shoulder && hip && knee && shoulder.score > minScore && hip.score > minScore && knee.score > minScore) {
+          return { angle: Math.round(calculateAngle(shoulder, hip, knee)), jointName: "Hip Angle" };
+        }
+      }
       break;
     }
     case "elbow-flexion": {
-      const shoulder = get("right_shoulder") || get("left_shoulder");
-      const elbow = get("right_elbow") || get("left_elbow");
-      const wrist = get("right_wrist") || get("left_wrist");
-      if (shoulder && elbow && wrist)
-        return {
-          angle: Math.round(calculateAngle(shoulder, elbow, wrist)),
-          jointName: "Elbow Angle",
-        };
+      for (const side of ["right", "left"]) {
+        const shoulder = get(`${side}_shoulder`);
+        const elbow = get(`${side}_elbow`);
+        const wrist = get(`${side}_wrist`);
+        if (shoulder && elbow && wrist && shoulder.score > minScore && elbow.score > minScore && wrist.score > minScore) {
+          return { angle: Math.round(calculateAngle(shoulder, elbow, wrist)), jointName: "Elbow Angle" };
+        }
+      }
       break;
     }
     case "ankle-dorsiflexion": {
-      const knee = get("right_knee") || get("left_knee");
-      const ankle = get("right_ankle") || get("left_ankle");
-      if (knee && ankle) {
-        const foot = { x: ankle.x, y: ankle.y + 0.1, score: 0.9 };
-        return {
-          angle: Math.round(calculateAngle(knee, ankle, foot)),
-          jointName: "Ankle Angle",
-        };
+      for (const side of ["right", "left"]) {
+        const knee = get(`${side}_knee`);
+        const ankle = get(`${side}_ankle`);
+        if (knee && ankle && knee.score > minScore && ankle.score > minScore) {
+          const foot = { x: ankle.x, y: ankle.y + 0.1, score: 0.9 };
+          return { angle: Math.round(calculateAngle(knee, ankle, foot)), jointName: "Ankle Angle" };
+        }
       }
       break;
     }
@@ -172,14 +78,11 @@ function getAngleForExercise(
       const rs = get("right_shoulder");
       const lh = get("left_hip");
       const rh = get("right_hip");
-      if (ls && rs && lh && rh) {
+      if (ls && rs && lh && rh && ls.score > minScore && rs.score > minScore && lh.score > minScore && rh.score > minScore) {
         const sAngle = Math.atan2(rs.y - ls.y, rs.x - ls.x);
         const hAngle = Math.atan2(rh.y - lh.y, rh.x - lh.x);
         const rot = Math.abs(((sAngle - hAngle) * 180) / Math.PI);
-        return {
-          angle: Math.round(Math.min(rot, 360 - rot)),
-          jointName: "Rotation",
-        };
+        return { angle: Math.round(Math.min(rot, 360 - rot)), jointName: "Rotation" };
       }
       break;
     }
@@ -187,10 +90,43 @@ function getAngleForExercise(
   return null;
 }
 
+// Detect form issues from keypoints
+function detectFormIssues(
+  exerciseId: string,
+  keypoints: Map<string, PoseKeypoint>
+): string | null {
+  const ls = keypoints.get("left_shoulder");
+  const rs = keypoints.get("right_shoulder");
+  const lh = keypoints.get("left_hip");
+  const rh = keypoints.get("right_hip");
+
+  if (ls && rs && lh && rh) {
+    const shoulderMidX = (ls.x + rs.x) / 2;
+    const hipMidX = (lh.x + rh.x) / 2;
+    const lean = Math.abs(shoulderMidX - hipMidX);
+    if (lean > 0.06) return "Straighten your back";
+  }
+
+  if (exerciseId === "knee-flexion") {
+    for (const side of ["right", "left"]) {
+      const knee = keypoints.get(`${side}_knee`);
+      const ankle = keypoints.get(`${side}_ankle`);
+      if (knee && ankle && knee.score > 0.3 && ankle.score > 0.3) {
+        if (Math.abs(knee.x - ankle.x) > 0.08) return "Keep your knee aligned";
+      }
+    }
+  }
+
+  return null;
+}
+
 export default function SessionPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animFrameRef = useRef<number>(0);
-  const frameCountRef = useRef(0);
+  const detectionCleanupRef = useRef<(() => void) | null>(null);
+  const prevAngleRef = useRef<number>(0);
+  const repPhaseRef = useRef<"up" | "down">("down");
+  const accumulatedScoreRef = useRef<number[]>([]);
 
   const [isPaused, setIsPaused] = useState(false);
   const [isStarted, setIsStarted] = useState(false);
@@ -203,12 +139,13 @@ export default function SessionPage() {
   const [feedbackType, setFeedbackType] = useState<FeedbackType>("good");
   const [movementQuality, setMovementQuality] = useState("Waiting...");
   const [formIssues, setFormIssues] = useState<string | null>(null);
-  const [feedbackHistory, setFeedbackHistory] = useState<FeedbackMessage[]>([]);
-  const [selectedExercise, setSelectedExercise] =
-    useState<ExerciseDefinition>(EXERCISES[0]);
+  const [selectedExercise, setSelectedExercise] = useState<ExerciseDefinition>(EXERCISES[0]);
   const [showExercisePicker, setShowExercisePicker] = useState(false);
   const [encouragingMsg, setEncouragingMsg] = useState("");
-  const [showCameraFeed, setShowCameraFeed] = useState(true);
+  const [cameraRequested, setCameraRequested] = useState(false);
+
+  const camera = useCamera();
+  const poseDetection = usePoseDetection();
 
   // Timer
   useEffect(() => {
@@ -217,146 +154,205 @@ export default function SessionPage() {
     return () => clearInterval(id);
   }, [isStarted, isPaused, isFinished]);
 
-  // Simulate rep counting (every ~3 seconds)
-  useEffect(() => {
-    if (!isStarted || isPaused || isFinished) return;
-    const id = setInterval(() => {
-      setReps((prev) => {
-        if (prev >= selectedExercise.targetReps) return prev;
-        return prev + 1;
-      });
-    }, 3000);
-    return () => clearInterval(id);
-  }, [isStarted, isPaused, isFinished, selectedExercise.targetReps]);
+  // Draw function: renders video frame + skeleton overlay
+  const drawFrame = useCallback(
+    (pose: PoseResult | null) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
 
-  // Canvas drawing loop
-  const drawFrame = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+      const w = canvas.width;
+      const h = canvas.height;
 
-    const w = canvas.width;
-    const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
 
-    // Dark background (simulated camera)
-    ctx.fillStyle = "#1e293b";
-    ctx.fillRect(0, 0, w, h);
+      // Draw video frame if active
+      if (camera.videoRef.current && camera.isActive) {
+        const video = camera.videoRef.current;
+        // Mirror the video (selfie camera)
+        ctx.save();
+        ctx.scale(-1, 1);
+        ctx.drawImage(video, -w, 0, w, h);
+        ctx.restore();
+      } else {
+        // Dark background placeholder
+        ctx.fillStyle = "#1e293b";
+        ctx.fillRect(0, 0, w, h);
 
-    // Subtle gradient
-    const grad = ctx.createRadialGradient(w / 2, h / 2, 50, w / 2, h / 2, w / 2);
-    grad.addColorStop(0, "rgba(8,145,178,0.05)");
-    grad.addColorStop(1, "rgba(0,0,0,0)");
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, w, h);
-
-    if (!isStarted || isFinished) {
-      // Show "Click Start" text
-      ctx.fillStyle = "rgba(255,255,255,0.4)";
-      ctx.font = "600 18px system-ui, sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText(
-        isFinished ? "Session Complete ✓" : "Press Start to begin AI analysis",
-        w / 2,
-        h / 2
-      );
-      return;
-    }
-
-    const frame = frameCountRef.current;
-    const keypoints = simulateKeypoints(frame, selectedExercise);
-
-    // Draw skeleton connections
-    ctx.lineWidth = 3;
-    ctx.lineCap = "round";
-    for (const [from, to] of SKELETON_CONNECTIONS) {
-      const p1 = keypoints.get(from);
-      const p2 = keypoints.get(to);
-      if (p1 && p2) {
-        ctx.beginPath();
-        ctx.moveTo(p1.x * w, p1.y * h);
-        ctx.lineTo(p2.x * w, p2.y * h);
-        ctx.strokeStyle = "rgba(34,211,238,0.6)";
-        ctx.stroke();
+        if (!cameraRequested) {
+          ctx.fillStyle = "rgba(255,255,255,0.4)";
+          ctx.font = "600 18px system-ui, sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText("Click 'Start AI Session' to enable your camera", w / 2, h / 2);
+        } else if (camera.isLoading || poseDetection.isModelLoading) {
+          ctx.fillStyle = "rgba(255,255,255,0.6)";
+          ctx.font = "600 18px system-ui, sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText("Loading AI model & camera...", w / 2, h / 2 - 10);
+          ctx.font = "400 13px system-ui, sans-serif";
+          ctx.fillStyle = "rgba(255,255,255,0.35)";
+          ctx.fillText("This may take a few seconds on first load", w / 2, h / 2 + 15);
+        } else if (camera.error || poseDetection.modelError) {
+          ctx.fillStyle = "rgba(239,68,68,0.8)";
+          ctx.font = "600 16px system-ui, sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText(camera.error || poseDetection.modelError || "Error", w / 2, h / 2);
+        }
       }
-    }
 
-    // Draw joints
-    for (const [, kp] of keypoints) {
-      ctx.beginPath();
-      ctx.arc(kp.x * w, kp.y * h, 5, 0, Math.PI * 2);
-      ctx.fillStyle = feedbackType === "good" ? "#10b981" : feedbackType === "warning" ? "#f59e0b" : "#ef4444";
-      ctx.fill();
-      ctx.strokeStyle = "rgba(255,255,255,0.8)";
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    }
+      // Draw skeleton overlay on top of video
+      if (pose && isStarted && !isFinished) {
+        // Draw connections
+        ctx.lineWidth = 3;
+        ctx.lineCap = "round";
+        for (const [from, to] of SKELETON_CONNECTIONS) {
+          const p1 = pose.keypoints.get(from);
+          const p2 = pose.keypoints.get(to);
+          if (p1 && p2 && p1.score > 0.3 && p2.score > 0.3) {
+            // Mirror x coordinates since we mirror the video
+            const x1 = (1 - p1.x) * w;
+            const y1 = p1.y * h;
+            const x2 = (1 - p2.x) * w;
+            const y2 = p2.y * h;
 
-    // Angle calculation
-    const angleResult = getAngleForExercise(selectedExercise.id, keypoints);
-    if (angleResult) {
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.strokeStyle =
+              feedbackType === "good"
+                ? "rgba(16,185,129,0.7)"
+                : feedbackType === "warning"
+                  ? "rgba(245,158,11,0.7)"
+                  : "rgba(239,68,68,0.7)";
+            ctx.stroke();
+          }
+        }
+
+        // Draw joints
+        for (const [, kp] of pose.keypoints) {
+          if (kp.score < 0.3) continue;
+          const x = (1 - kp.x) * w;
+          const y = kp.y * h;
+
+          ctx.beginPath();
+          ctx.arc(x, y, 6, 0, Math.PI * 2);
+          ctx.fillStyle =
+            feedbackType === "good"
+              ? "#10b981"
+              : feedbackType === "warning"
+                ? "#f59e0b"
+                : "#ef4444";
+          ctx.fill();
+          ctx.strokeStyle = "rgba(255,255,255,0.9)";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+
+        // Draw angle label near the relevant joint
+        const angleResult = getAngleForExercise(selectedExercise.id, pose.keypoints);
+        if (angleResult) {
+          // Find the primary joint to label
+          let jointKp: PoseKeypoint | undefined;
+          if (selectedExercise.id === "knee-flexion") {
+            jointKp = pose.keypoints.get("right_knee") || pose.keypoints.get("left_knee");
+          } else if (selectedExercise.id === "shoulder-abduction") {
+            jointKp = pose.keypoints.get("right_shoulder") || pose.keypoints.get("left_shoulder");
+          } else if (selectedExercise.id === "hip-extension") {
+            jointKp = pose.keypoints.get("right_hip") || pose.keypoints.get("left_hip");
+          } else if (selectedExercise.id === "elbow-flexion") {
+            jointKp = pose.keypoints.get("right_elbow") || pose.keypoints.get("left_elbow");
+          } else if (selectedExercise.id === "ankle-dorsiflexion") {
+            jointKp = pose.keypoints.get("right_ankle") || pose.keypoints.get("left_ankle");
+          } else if (selectedExercise.id === "trunk-rotation") {
+            jointKp = pose.keypoints.get("left_shoulder") || pose.keypoints.get("right_shoulder");
+          }
+
+          if (jointKp && jointKp.score > 0.3) {
+            const jx = (1 - jointKp.x) * w;
+            const jy = jointKp.y * h;
+
+            // Background pill
+            const label = `${angleResult.angle}°`;
+            ctx.font = "bold 15px system-ui, sans-serif";
+            const metrics = ctx.measureText(label);
+            const pillW = metrics.width + 16;
+            const pillH = 26;
+            const pillX = jx + 15;
+            const pillY = jy - 35;
+
+            ctx.fillStyle =
+              feedbackType === "good"
+                ? "rgba(16,185,129,0.9)"
+                : feedbackType === "warning"
+                  ? "rgba(245,158,11,0.9)"
+                  : "rgba(239,68,68,0.9)";
+            ctx.beginPath();
+            ctx.roundRect(pillX - pillW / 2, pillY - pillH / 2, pillW, pillH, 6);
+            ctx.fill();
+
+            ctx.fillStyle = "white";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(label, pillX, pillY);
+          }
+        }
+      }
+    },
+    [camera, isStarted, isFinished, feedbackType, selectedExercise.id, cameraRequested, poseDetection.isModelLoading, poseDetection.modelError, camera.error]
+  );
+
+  // Process pose results — calculate angle, form, reps
+  const processPose = useCallback(
+    (pose: PoseResult) => {
+      const angleResult = getAngleForExercise(selectedExercise.id, pose.keypoints);
+      if (!angleResult) return;
+
       setCurrentAngle(angleResult.angle);
-      const formResult = analyzeForm(
-        angleResult.angle,
-        selectedExercise.targetAngleRange
-      );
+
+      const formResult = analyzeForm(angleResult.angle, selectedExercise.targetAngleRange);
       setFormScore(formResult.score);
       setFeedbackMessage(formResult.message);
       setFeedbackType(formResult.type);
       setMovementQuality(
-        formResult.type === "good"
-          ? "Good"
-          : formResult.type === "warning"
-            ? "Fair"
-            : "Needs work"
+        formResult.type === "good" ? "Good" : formResult.type === "warning" ? "Fair" : "Needs work"
       );
 
-      // Form issues
-      const issues = detectFormIssues(selectedExercise.id, keypoints);
+      accumulatedScoreRef.current.push(formResult.score);
+      if (accumulatedScoreRef.current.length > 30) accumulatedScoreRef.current.shift();
+
+      const issues = detectFormIssues(selectedExercise.id, pose.keypoints);
       setFormIssues(issues);
-    }
 
-    // Draw angle indicator on canvas
-    if (angleResult) {
-      const knee =
-        keypoints.get("right_knee") || keypoints.get("left_knee");
-      if (knee) {
-        ctx.fillStyle =
-          feedbackType === "good"
-            ? "rgba(16,185,129,0.9)"
-            : feedbackType === "warning"
-              ? "rgba(245,158,11,0.9)"
-              : "rgba(239,68,68,0.9)";
-        ctx.font = "bold 16px system-ui, sans-serif";
-        ctx.textAlign = "center";
-        ctx.fillText(
-          `${angleResult.angle}°`,
-          knee.x * w + 30,
-          knee.y * h - 10
-        );
+      // Rep counting: detect angle crossing the midpoint of the target range
+      const midpoint = (selectedExercise.targetAngleRange.min + selectedExercise.targetAngleRange.max) / 2;
+      const angle = angleResult.angle;
 
-        // Angle arc
-        ctx.beginPath();
-        ctx.arc(knee.x * w, knee.y * h, 20, 0, ((angleResult.angle / 180) * Math.PI));
-        ctx.strokeStyle =
-          feedbackType === "good"
-            ? "rgba(16,185,129,0.5)"
-            : "rgba(245,158,11,0.5)";
-        ctx.lineWidth = 3;
-        ctx.stroke();
+      if (prevAngleRef.current > 0) {
+        if (repPhaseRef.current === "down" && angle > midpoint + 5) {
+          repPhaseRef.current = "up";
+        } else if (repPhaseRef.current === "up" && angle < midpoint - 5) {
+          repPhaseRef.current = "down";
+          setReps((prev) => {
+            if (prev >= selectedExercise.targetReps) return prev;
+            return prev + 1;
+          });
+        }
       }
-    }
-  }, [isStarted, isFinished, selectedExercise, feedbackType]);
+      prevAngleRef.current = angle;
+    },
+    [selectedExercise]
+  );
 
-  // Animation loop
+  // Animation loop — continuously draw frames
   useEffect(() => {
     if (!isStarted || isPaused) return;
 
     let running = true;
     const loop = () => {
       if (!running) return;
-      frameCountRef.current++;
-      drawFrame();
+      // Draw the latest pose (pose detection runs separately at ~15fps)
+      drawFrame(poseDetection.currentPose);
       animFrameRef.current = requestAnimationFrame(loop);
     };
     animFrameRef.current = requestAnimationFrame(loop);
@@ -365,15 +361,16 @@ export default function SessionPage() {
       running = false;
       cancelAnimationFrame(animFrameRef.current);
     };
-  }, [isStarted, isPaused, drawFrame]);
+  }, [isStarted, isPaused, drawFrame, poseDetection.currentPose]);
 
   // Draw idle state
   useEffect(() => {
     if (isStarted && !isPaused) return;
-    drawFrame();
+    drawFrame(null);
   }, [isStarted, isPaused, isFinished, drawFrame]);
 
-  const handleStart = () => {
+  const handleStart = async () => {
+    setCameraRequested(true);
     setIsStarted(true);
     setIsPaused(false);
     setIsFinished(false);
@@ -384,8 +381,31 @@ export default function SessionPage() {
     setFeedbackMessage("");
     setFeedbackType("good");
     setMovementQuality("Analyzing...");
-    setFeedbackHistory([]);
-    frameCountRef.current = 0;
+    setFormIssues(null);
+    prevAngleRef.current = 0;
+    repPhaseRef.current = "down";
+    accumulatedScoreRef.current = [];
+
+    // Load model if not loaded
+    if (!poseDetection.detectorRef.current) {
+      await poseDetection.loadModel();
+    }
+
+    // Start camera
+    if (!camera.isActive) {
+      await camera.startCamera();
+    }
+
+    // Start detection loop once camera is active
+    // We need to wait a tick for the video to be ready
+    setTimeout(() => {
+      if (camera.videoRef.current && poseDetection.detectorRef.current) {
+        detectionCleanupRef.current = poseDetection.startDetectionLoop(
+          camera.videoRef.current,
+          processPose
+        ) as unknown as () => void;
+      }
+    }, 500);
   };
 
   const handlePause = () => {
@@ -395,9 +415,26 @@ export default function SessionPage() {
   const handleEnd = () => {
     setIsFinished(true);
     setIsPaused(false);
-    cancelAnimationFrame(animFrameRef.current);
+
+    // Stop detection
+    if (detectionCleanupRef.current) {
+      detectionCleanupRef.current();
+      detectionCleanupRef.current = null;
+    }
+    poseDetection.stopDetectionLoop();
+
+    // Stop camera
+    camera.stopCamera();
 
     // Save session
+    const avgScore =
+      accumulatedScoreRef.current.length > 0
+        ? Math.round(
+            accumulatedScoreRef.current.reduce((a, b) => a + b, 0) /
+              accumulatedScoreRef.current.length
+          )
+        : formScore || 85;
+
     const state = loadState();
     const session = {
       id: Date.now().toString(),
@@ -409,16 +446,25 @@ export default function SessionPage() {
       setsCompleted: 1,
       targetSets: selectedExercise.targetSets,
       duration: elapsedSeconds,
-      averageFormScore: formScore || 85,
+      averageFormScore: avgScore,
       peakAngle: currentAngle,
       minAngle: Math.max(0, currentAngle - 20),
-      feedbackMessages: feedbackHistory,
+      feedbackMessages: [],
       completed: reps >= selectedExercise.targetReps,
     };
     const newState = addSession(state, session);
     saveState(newState);
 
     setEncouragingMsg(getEncouragingMessage());
+  };
+
+  const handleExit = () => {
+    if (detectionCleanupRef.current) {
+      detectionCleanupRef.current();
+      detectionCleanupRef.current = null;
+    }
+    poseDetection.stopDetectionLoop();
+    camera.stopCamera();
   };
 
   const formatTime = (sec: number) => {
@@ -430,6 +476,8 @@ export default function SessionPage() {
   const progressPercent = selectedExercise.targetReps
     ? Math.round((reps / selectedExercise.targetReps) * 100)
     : 0;
+
+  const showSkeleton = camera.isActive && isStarted && !isFinished;
 
   return (
     <div className="min-h-screen bg-background">
@@ -446,8 +494,7 @@ export default function SessionPage() {
               <span className="text-xs opacity-60">▼</span>
             </button>
             <div className="text-sm text-muted">
-              Session:{" "}
-              <span className="font-medium text-foreground">Day 12</span>
+              Session: <span className="font-medium text-foreground">Day 12</span>
             </div>
             <div className="text-sm font-mono text-muted tabular-nums">
               ⏱ {formatTime(elapsedSeconds)}
@@ -458,11 +505,17 @@ export default function SessionPage() {
                 Live
               </div>
             )}
+            {showSkeleton && poseDetection.currentPose && (
+              <div className="text-[10px] text-success/60 font-mono">
+                {Math.round((poseDetection.currentPose?.score ?? 0) * 100)}% conf
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-2">
             {!isStarted || isFinished ? (
               <Link
                 href="/"
+                onClick={handleExit}
                 className="px-4 py-2 text-sm font-medium text-muted hover:text-foreground transition-colors"
               >
                 Exit
@@ -494,7 +547,10 @@ export default function SessionPage() {
                     setSelectedExercise(ex);
                     setShowExercisePicker(false);
                     if (isStarted) {
-                      handleStart();
+                      // Restart with new exercise
+                      prevAngleRef.current = 0;
+                      repPhaseRef.current = "down";
+                      accumulatedScoreRef.current = [];
                     }
                   }}
                   className={`p-3 rounded-xl border text-left transition-all ${
@@ -518,9 +574,17 @@ export default function SessionPage() {
         <div className="grid lg:grid-cols-[1fr_340px] gap-6">
           {/* Video / Canvas area */}
           <div className="relative">
+            {/* Hidden video element for camera feed */}
+            <video
+              ref={camera.videoRef}
+              playsInline
+              muted
+              autoPlay
+              style={{ display: "none" }}
+            />
+
             <div className="relative bg-card rounded-2xl border border-card-border overflow-hidden shadow-lg">
-              {/* Camera canvas */}
-              <div className="relative aspect-video">
+              <div className="relative aspect-video bg-slate-900">
                 <canvas
                   ref={canvasRef}
                   width={960}
@@ -528,44 +592,75 @@ export default function SessionPage() {
                   className="w-full h-full"
                 />
 
-                {/* Camera feed background (simulated) */}
-                {showCameraFeed && isStarted && !isFinished && (
-                  <div className="absolute inset-0 pointer-events-none">
-                    {/* Subtle person silhouette hint */}
-                    <svg
-                      viewBox="0 0 960 540"
-                      className="absolute inset-0 w-full h-full opacity-10"
-                    >
-                      <ellipse cx="480" cy="120" rx="30" ry="35" fill="#94a3b8" />
-                      <rect x="460" y="155" width="40" height="100" rx="10" fill="#94a3b8" />
-                      <rect x="430" y="255" width="25" height="120" rx="8" fill="#94a3b8" />
-                      <rect x="505" y="255" width="25" height="120" rx="8" fill="#94a3b8" />
-                    </svg>
+                {/* AI analyzing indicator */}
+                {isStarted && !isPaused && !isFinished && (
+                  <div className="absolute top-4 left-4 flex items-center gap-2 z-10">
+                    <div className="px-3 py-1.5 rounded-lg bg-black/50 backdrop-blur-sm text-white text-xs font-medium flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
+                      {camera.isActive ? "AI analyzing movement..." : "Connecting camera..."}
+                    </div>
                   </div>
                 )}
 
-                {/* AI analyzing indicator */}
-                {isStarted && !isPaused && !isFinished && (
-                  <div className="absolute top-4 left-4 flex items-center gap-2">
-                    <div className="px-3 py-1.5 rounded-lg bg-black/50 backdrop-blur-sm text-white text-xs font-medium flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
-                      AI analyzing movement...
+                {/* Model loading indicator */}
+                {isStarted && poseDetection.isModelLoading && (
+                  <div className="absolute top-4 right-4 z-10">
+                    <div className="px-3 py-1.5 rounded-lg bg-accent/80 backdrop-blur-sm text-white text-xs font-medium flex items-center gap-2">
+                      <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                      Loading AI model...
+                    </div>
+                  </div>
+                )}
+
+                {/* Camera permission prompt */}
+                {isStarted && !camera.isActive && !camera.isLoading && !camera.error && (
+                  <div className="absolute inset-0 flex items-center justify-center z-10">
+                    <div className="text-center p-6 bg-black/40 backdrop-blur-sm rounded-2xl max-w-sm">
+                      <div className="text-4xl mb-3">📷</div>
+                      <p className="text-white font-semibold mb-2">Camera access needed</p>
+                      <p className="text-white/60 text-sm mb-4">
+                        Allow camera access when prompted by your browser
+                      </p>
+                      <button
+                        onClick={camera.startCamera}
+                        className="px-5 py-2.5 bg-primary text-white text-sm font-semibold rounded-xl hover:bg-primary-dark transition-colors"
+                      >
+                        Grant Camera Access
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Camera error */}
+                {camera.error && (
+                  <div className="absolute inset-0 flex items-center justify-center z-10">
+                    <div className="text-center p-6 bg-black/50 backdrop-blur-sm rounded-2xl max-w-sm">
+                      <div className="text-4xl mb-3">⚠️</div>
+                      <p className="text-white font-semibold mb-2">Camera Error</p>
+                      <p className="text-white/60 text-sm mb-4">{camera.error}</p>
+                      <button
+                        onClick={camera.startCamera}
+                        className="px-5 py-2.5 bg-primary text-white text-sm font-semibold rounded-xl hover:bg-primary-dark transition-colors"
+                      >
+                        Try Again
+                      </button>
                     </div>
                   </div>
                 )}
 
                 {/* Pause overlay */}
                 {isPaused && (
-                  <div className="absolute inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center">
+                  <div className="absolute inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-10">
                     <div className="text-white text-2xl font-bold">Paused</div>
                   </div>
                 )}
 
                 {/* Feedback badge */}
                 {isStarted && !isFinished && feedbackMessage && (
-                  <div
-                    className={`absolute bottom-4 left-4 right-4 sm:left-auto sm:right-4 sm:w-auto`}
-                  >
+                  <div className="absolute bottom-4 left-4 right-4 sm:left-auto sm:right-4 sm:w-auto z-10">
                     <div
                       className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold shadow-lg backdrop-blur-sm transition-all duration-300 ${
                         feedbackType === "good"
@@ -575,11 +670,7 @@ export default function SessionPage() {
                             : "bg-error/90 text-white"
                       }`}
                     >
-                      {feedbackType === "good"
-                        ? "✓"
-                        : feedbackType === "warning"
-                          ? "⚠"
-                          : "✕"}{" "}
+                      {feedbackType === "good" ? "✓" : feedbackType === "warning" ? "⚠" : "✕"}{" "}
                       {feedbackMessage}
                     </div>
                   </div>
@@ -592,10 +683,23 @@ export default function SessionPage() {
               <div className="mt-4 flex items-center gap-3">
                 <button
                   onClick={handleStart}
-                  className="flex-1 sm:flex-none inline-flex items-center justify-center gap-2.5 px-8 py-4 bg-gradient-to-r from-primary to-primary-dark text-white font-semibold rounded-xl shadow-lg shadow-primary/20 hover:shadow-xl transition-all hover:scale-[1.01] active:scale-[0.99] text-base"
+                  disabled={camera.isLoading || poseDetection.isModelLoading}
+                  className="flex-1 sm:flex-none inline-flex items-center justify-center gap-2.5 px-8 py-4 bg-gradient-to-r from-primary to-primary-dark text-white font-semibold rounded-xl shadow-lg shadow-primary/20 hover:shadow-xl transition-all hover:scale-[1.01] active:scale-[0.99] text-base disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100"
                 >
-                  <span className="w-2.5 h-2.5 rounded-full bg-white/80 animate-pulse-soft" />
-                  {isFinished ? "Start New Session" : "Start AI Session"}
+                  {(camera.isLoading || poseDetection.isModelLoading) ? (
+                    <>
+                      <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                      Setting up...
+                    </>
+                  ) : (
+                    <>
+                      <span className="w-2.5 h-2.5 rounded-full bg-white/80 animate-pulse-soft" />
+                      {isFinished ? "Start New Session" : "Start AI Session"}
+                    </>
+                  )}
                 </button>
                 {isFinished && (
                   <Link
@@ -637,9 +741,7 @@ export default function SessionPage() {
                     <p className="text-xs text-muted">Avg Form Score</p>
                   </div>
                   <div className="text-center p-3 rounded-xl bg-accent/5">
-                    <p className="text-2xl font-bold text-accent">
-                      {formatTime(elapsedSeconds)}
-                    </p>
+                    <p className="text-2xl font-bold text-accent">{formatTime(elapsedSeconds)}</p>
                     <p className="text-xs text-muted">Duration</p>
                   </div>
                 </div>
@@ -666,30 +768,14 @@ export default function SessionPage() {
               {/* Form Score Ring */}
               <div className="flex items-center justify-center mb-5">
                 <div className="relative w-28 h-28">
-                  <svg
-                    viewBox="0 0 120 120"
-                    className="w-full h-full -rotate-90"
-                  >
+                  <svg viewBox="0 0 120 120" className="w-full h-full -rotate-90">
+                    <circle cx="60" cy="60" r="52" fill="none" stroke="#e2e8f0" strokeWidth="8" />
                     <circle
                       cx="60"
                       cy="60"
                       r="52"
                       fill="none"
-                      stroke="#e2e8f0"
-                      strokeWidth="8"
-                    />
-                    <circle
-                      cx="60"
-                      cy="60"
-                      r="52"
-                      fill="none"
-                      stroke={
-                        formScore >= 80
-                          ? "#10b981"
-                          : formScore >= 60
-                            ? "#f59e0b"
-                            : "#ef4444"
-                      }
+                      stroke={formScore >= 80 ? "#10b981" : formScore >= 60 ? "#f59e0b" : "#ef4444"}
                       strokeWidth="8"
                       strokeLinecap="round"
                       strokeDasharray={`${2 * Math.PI * 52}`}
@@ -698,9 +784,7 @@ export default function SessionPage() {
                     />
                   </svg>
                   <div className="absolute inset-0 flex flex-col items-center justify-center">
-                    <span className="text-2xl font-bold">
-                      {isStarted && !isFinished ? formScore : "--"}
-                    </span>
+                    <span className="text-2xl font-bold">{isStarted && !isFinished ? formScore : "--"}</span>
                     <span className="text-xs text-muted">Form Score</span>
                   </div>
                 </div>
@@ -716,7 +800,17 @@ export default function SessionPage() {
                 </div>
                 <div className="flex items-center justify-between py-2 border-b border-card-border">
                   <span className="text-sm text-muted">
-                    {currentAngle > 0 ? "Knee Angle" : "Angle"}
+                    {selectedExercise.id === "knee-flexion"
+                      ? "Knee Angle"
+                      : selectedExercise.id === "shoulder-abduction"
+                        ? "Shoulder Angle"
+                        : selectedExercise.id === "hip-extension"
+                          ? "Hip Angle"
+                          : selectedExercise.id === "elbow-flexion"
+                            ? "Elbow Angle"
+                            : selectedExercise.id === "ankle-dorsiflexion"
+                              ? "Ankle Angle"
+                              : "Angle"}
                   </span>
                   <span className="text-sm font-bold tabular-nums">
                     {isStarted && !isFinished ? `${currentAngle}°` : "--°"}
@@ -725,8 +819,7 @@ export default function SessionPage() {
                 <div className="flex items-center justify-between py-2 border-b border-card-border">
                   <span className="text-sm text-muted">Target Range</span>
                   <span className="text-sm font-bold tabular-nums">
-                    {selectedExercise.targetAngleRange.min}°–
-                    {selectedExercise.targetAngleRange.max}°
+                    {selectedExercise.targetAngleRange.min}°–{selectedExercise.targetAngleRange.max}°
                   </span>
                 </div>
                 <div className="flex items-center justify-between py-2">
@@ -760,19 +853,11 @@ export default function SessionPage() {
                 {isStarted && !isFinished ? (
                   <>
                     <div className="text-3xl mb-2">
-                      {feedbackType === "good"
-                        ? "🟢"
-                        : feedbackType === "warning"
-                          ? "🟡"
-                          : "🔴"}
+                      {feedbackType === "good" ? "🟢" : feedbackType === "warning" ? "🟡" : "🔴"}
                     </div>
-                    <p className="text-lg font-bold mb-1">
-                      {feedbackMessage || "Analyzing..."}
-                    </p>
+                    <p className="text-lg font-bold mb-1">{feedbackMessage || "Analyzing..."}</p>
                     {formIssues && (
-                      <p className="text-sm text-warning font-medium">
-                        ⚠ {formIssues}
-                      </p>
+                      <p className="text-sm text-warning font-medium">⚠ {formIssues}</p>
                     )}
                   </>
                 ) : (
@@ -810,9 +895,7 @@ export default function SessionPage() {
               <h4 className="text-xs font-bold uppercase tracking-wider text-muted mb-2">
                 About this exercise
               </h4>
-              <p className="text-sm text-muted leading-relaxed">
-                {selectedExercise.description}
-              </p>
+              <p className="text-sm text-muted leading-relaxed">{selectedExercise.description}</p>
               <div className="mt-3 flex flex-wrap gap-2">
                 <span className="px-2 py-1 rounded-md bg-primary/10 text-primary text-xs font-medium">
                   {selectedExercise.category}
