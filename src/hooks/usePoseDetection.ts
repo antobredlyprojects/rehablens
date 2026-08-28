@@ -45,20 +45,15 @@ export interface UsePoseDetectionReturn {
   startDetectionLoop: (
     video: HTMLVideoElement,
     onPose: (pose: PoseResult) => void
-  ) => void;
+  ) => (() => void) | undefined;
   stopDetectionLoop: () => void;
 }
-
-// MoveNet keypoint index mapping
-const KEYPOINT_INDICES: Record<string, number> = {};
-MOVENET_KEYPOINTS.forEach((name, idx) => {
-  KEYPOINT_INDICES[name] = idx;
-});
 
 export function usePoseDetection(): UsePoseDetectionReturn {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const detectorRef = useRef<any>(null);
   const animFrameRef = useRef<number>(0);
+  const isDetectingRef = useRef(false);
   const [currentPose, setCurrentPose] = useState<PoseResult | null>(null);
   const [isModelLoading, setIsModelLoading] = useState(false);
   const [isDetecting, setIsDetecting] = useState(false);
@@ -153,7 +148,8 @@ export function usePoseDetection(): UsePoseDetectionReturn {
 
   const startDetectionLoop = useCallback(
     (video: HTMLVideoElement, onPose: (pose: PoseResult) => void) => {
-      if (isDetecting) return;
+      if (isDetectingRef.current) return;
+      isDetectingRef.current = true;
       setIsDetecting(true);
 
       let running = true;
@@ -180,10 +176,11 @@ export function usePoseDetection(): UsePoseDetectionReturn {
         if (animFrameRef.current) {
           clearTimeout(animFrameRef.current as unknown as number);
         }
+        isDetectingRef.current = false;
         setIsDetecting(false);
       };
     },
-    [detectPose, isDetecting]
+    [detectPose]
   );
 
   const stopDetectionLoop = useCallback(() => {

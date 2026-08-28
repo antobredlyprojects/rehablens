@@ -143,6 +143,12 @@ export default function SessionPage() {
   const [showExercisePicker, setShowExercisePicker] = useState(false);
   const [encouragingMsg, setEncouragingMsg] = useState("");
   const [cameraRequested, setCameraRequested] = useState(false);
+  const selectedExerciseRef = useRef(selectedExercise);
+
+  // Keep ref in sync with state so detection callback always uses latest exercise
+  useEffect(() => {
+    selectedExerciseRef.current = selectedExercise;
+  }, [selectedExercise]);
 
   const camera = useCamera();
   const poseDetection = usePoseDetection();
@@ -288,7 +294,11 @@ export default function SessionPage() {
                   ? "rgba(245,158,11,0.9)"
                   : "rgba(239,68,68,0.9)";
             ctx.beginPath();
-            ctx.roundRect(pillX - pillW / 2, pillY - pillH / 2, pillW, pillH, 6);
+            if (ctx.roundRect) {
+              ctx.roundRect(pillX - pillW / 2, pillY - pillH / 2, pillW, pillH, 6);
+            } else {
+              ctx.rect(pillX - pillW / 2, pillY - pillH / 2, pillW, pillH);
+            }
             ctx.fill();
 
             ctx.fillStyle = "white";
@@ -300,17 +310,17 @@ export default function SessionPage() {
       }
     },
     [camera, isStarted, isFinished, feedbackType, selectedExercise.id, cameraRequested, poseDetection.isModelLoading, poseDetection.modelError, camera.error]
-  );
-
-  // Process pose results — calculate angle, form, reps
+  );  // Process pose results — calculate angle, form, reps
+  // Uses ref for selectedExercise to avoid stale closure in detection loop
   const processPose = useCallback(
     (pose: PoseResult) => {
-      const angleResult = getAngleForExercise(selectedExercise.id, pose.keypoints);
+      const exercise = selectedExerciseRef.current;
+      const angleResult = getAngleForExercise(exercise.id, pose.keypoints);
       if (!angleResult) return;
 
       setCurrentAngle(angleResult.angle);
 
-      const formResult = analyzeForm(angleResult.angle, selectedExercise.targetAngleRange);
+      const formResult = analyzeForm(angleResult.angle, exercise.targetAngleRange);
       setFormScore(formResult.score);
       setFeedbackMessage(formResult.message);
       setFeedbackType(formResult.type);
@@ -325,7 +335,7 @@ export default function SessionPage() {
       setFormIssues(issues);
 
       // Rep counting: detect angle crossing the midpoint of the target range
-      const midpoint = (selectedExercise.targetAngleRange.min + selectedExercise.targetAngleRange.max) / 2;
+      const midpoint = (exercise.targetAngleRange.min + exercise.targetAngleRange.max) / 2;
       const angle = angleResult.angle;
 
       if (prevAngleRef.current > 0) {
@@ -334,14 +344,14 @@ export default function SessionPage() {
         } else if (repPhaseRef.current === "up" && angle < midpoint - 5) {
           repPhaseRef.current = "down";
           setReps((prev) => {
-            if (prev >= selectedExercise.targetReps) return prev;
+            if (prev >= exercise.targetReps) return prev;
             return prev + 1;
           });
         }
       }
       prevAngleRef.current = angle;
     },
-    [selectedExercise]
+    []
   );
 
   // Animation loop — continuously draw frames
@@ -391,21 +401,28 @@ export default function SessionPage() {
       await poseDetection.loadModel();
     }
 
-    // Start camera
+    // Start camera if not active
     if (!camera.isActive) {
       await camera.startCamera();
     }
 
-    // Start detection loop once camera is active
-    // We need to wait a tick for the video to be ready
-    setTimeout(() => {
-      if (camera.videoRef.current && poseDetection.detectorRef.current) {
-        detectionCleanupRef.current = poseDetection.startDetectionLoop(
-          camera.videoRef.current,
-          processPose
-        ) as unknown as () => void;
-      }
-    }, 500);
+    // Only start detection if camera and model are both ready
+    if (camera.isActive && poseDetection.detectorRef.current && camera.videoRef.current) {
+      // Wait a short tick for the video element to have valid dimensions
+      const startLoop = () => {
+        const video = camera.videoRef.current;
+        if (video && video.readyState >= 2 && poseDetection.detectorRef.current) {
+          detectionCleanupRef.current = poseDetection.startDetectionLoop(
+            video,
+            processPose
+          ) as unknown as (() => void) | undefined ?? null;
+        } else {
+          // Retry until video is ready (max 2 seconds)
+          setTimeout(startLoop, 200);
+        }
+      };
+      setTimeout(startLoop, 300);
+    }
   };
 
   const handlePause = () => {
