@@ -354,24 +354,23 @@ export default function SessionPage() {
     []
   );
 
-  // Animation loop — continuously draw frames
+  // Animation loop — continuously draw frames (separate from detection)
+  // Uses refs to avoid re-renders; draws video + last known pose
   useEffect(() => {
     if (!isStarted || isPaused) return;
 
     let running = true;
     const loop = () => {
       if (!running) return;
-      // Draw the latest pose (pose detection runs separately at ~15fps)
       drawFrame(poseDetection.currentPose);
-      animFrameRef.current = requestAnimationFrame(loop);
+      requestAnimationFrame(loop);
     };
-    animFrameRef.current = requestAnimationFrame(loop);
+    requestAnimationFrame(loop);
 
     return () => {
       running = false;
-      cancelAnimationFrame(animFrameRef.current);
     };
-  }, [isStarted, isPaused, drawFrame, poseDetection.currentPose]);
+  }, [isStarted, isPaused, drawFrame]);;
 
   // Draw idle state
   useEffect(() => {
@@ -398,31 +397,48 @@ export default function SessionPage() {
 
     // Load model if not loaded
     if (!poseDetection.detectorRef.current) {
+      console.log("[RehabLens] Loading model...");
       await poseDetection.loadModel();
+      console.log("[RehabLens] Model loaded:", !!poseDetection.detectorRef.current);
     }
 
     // Start camera if not active
     if (!camera.isActive) {
+      console.log("[RehabLens] Starting camera...");
       await camera.startCamera();
+      console.log("[RehabLens] Camera active:", camera.isActive);
     }
 
     // Only start detection if camera and model are both ready
-    if (camera.isActive && poseDetection.detectorRef.current && camera.videoRef.current) {
-      // Wait a short tick for the video element to have valid dimensions
-      const startLoop = () => {
-        const video = camera.videoRef.current;
-        if (video && video.readyState >= 2 && poseDetection.detectorRef.current) {
-          detectionCleanupRef.current = poseDetection.startDetectionLoop(
-            video,
-            processPose
-          ) as unknown as (() => void) | undefined ?? null;
-        } else {
-          // Retry until video is ready (max 2 seconds)
-          setTimeout(startLoop, 200);
-        }
-      };
-      setTimeout(startLoop, 300);
-    }
+    console.log("[RehabLens] Starting detection loop. camera:", camera.isActive, "model:", !!poseDetection.detectorRef.current);
+
+    // Retry until video is fully ready (max 10 seconds, every 300ms)
+    let attempts = 0;
+    const MAX_ATTEMPTS = 33; // ~10 seconds
+    const startLoop = () => {
+      attempts++;
+      const video = camera.videoRef.current;
+      const modelReady = !!poseDetection.detectorRef.current;
+      const videoReady = !!video && video.readyState >= 3 && video.videoWidth > 0;
+
+      console.log(`[RehabLens] Attempt ${attempts}: video=${!!video} readyState=${video?.readyState} dims=${video?.videoWidth}x${video?.videoHeight} model=${modelReady}`);
+
+      if (videoReady && modelReady) {
+        console.log("[RehabLens] ✓ Starting detection loop");
+        detectionCleanupRef.current = poseDetection.startDetectionLoop(
+          video!,
+          processPose
+        ) as unknown as (() => void) | undefined ?? null;
+      } else if (attempts < MAX_ATTEMPTS) {
+        setTimeout(startLoop, 300);
+      } else {
+        console.error("[RehabLens] ✗ Detection loop start timed out after", MAX_ATTEMPTS, "attempts");
+        setMovementQuality("Failed to start");
+        setFeedbackMessage("Detection failed to start. Check console for details.");
+        setFeedbackType("error");
+      }
+    };
+    setTimeout(startLoop, 500);
   };
 
   const handlePause = () => {

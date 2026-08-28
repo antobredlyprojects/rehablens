@@ -52,7 +52,7 @@ export interface UsePoseDetectionReturn {
 export function usePoseDetection(): UsePoseDetectionReturn {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const detectorRef = useRef<any>(null);
-  const animFrameRef = useRef<number>(0);
+  const animFrameRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isDetectingRef = useRef(false);
   const [currentPose, setCurrentPose] = useState<PoseResult | null>(null);
   const [isModelLoading, setIsModelLoading] = useState(false);
@@ -66,6 +66,7 @@ export function usePoseDetection(): UsePoseDetectionReturn {
     setModelError(null);
 
     try {
+      console.log("[RehabLens] Loading TensorFlow.js backend...");
       // Dynamic imports to avoid SSR issues
       const [tf, poseDetection] = await Promise.all([
         import("@tensorflow/tfjs-core"),
@@ -73,11 +74,14 @@ export function usePoseDetection(): UsePoseDetectionReturn {
       ]);
 
       // Import and set WebGL backend
-      const backend = await import("@tensorflow/tfjs-backend-webgl");
-      await tf.setBackend("webgl");
+      await import("@tensorflow/tfjs-backend-webgl");
+      const backend = await tf.setBackend("webgl");
+      console.log("[RehabLens] WebGL backend:", backend);
       await tf.ready();
+      console.log("[RehabLens] TensorFlow.js ready");
 
       // Create MoveNet detector
+      console.log("[RehabLens] Creating MoveNet detector...");
       const detector = await poseDetection.createDetector(
         poseDetection.SupportedModels.MoveNet,
         {
@@ -89,8 +93,9 @@ export function usePoseDetection(): UsePoseDetectionReturn {
       );
 
       detectorRef.current = detector;
+      console.log("[RehabLens] MoveNet detector ready ✓");
     } catch (err: unknown) {
-      console.error("Failed to load pose detection model:", err);
+      console.error("[RehabLens] Failed to load pose detection model:", err);
       let message = "Failed to load AI model";
       if (err instanceof Error) {
         message = `AI model error: ${err.message}`;
@@ -103,8 +108,19 @@ export function usePoseDetection(): UsePoseDetectionReturn {
 
   const detectPose = useCallback(
     async (video: HTMLVideoElement): Promise<PoseResult | null> => {
-      if (!detectorRef.current) return null;
-      if (video.readyState < 2) return null; // video not ready
+      if (!detectorRef.current) {
+        console.warn("[RehabLens] No detector available");
+        return null;
+      }
+      // Require HAVE_FUTURE_DATA (3) — ensures videoWidth/videoHeight are known
+      if (video.readyState < 3) {
+        console.log("[RehabLens] Video not ready, readyState:", video.readyState);
+        return null;
+      }
+      if (video.videoWidth === 0 || video.videoHeight === 0) {
+        console.warn("[RehabLens] Video dimensions are 0");
+        return null;
+      }
 
       try {
         const poses = await detectorRef.current.estimatePoses(video, {
@@ -112,7 +128,10 @@ export function usePoseDetection(): UsePoseDetectionReturn {
           flipHorizontal: false,
         });
 
-        if (!poses || poses.length === 0) return null;
+        if (!poses || poses.length === 0) {
+          console.log("[RehabLens] No poses detected in frame");
+          return null;
+        }
 
         const pose = poses[0];
         const keypoints = new Map<string, PoseKeypoint>();
@@ -139,7 +158,7 @@ export function usePoseDetection(): UsePoseDetectionReturn {
         setCurrentPose(result);
         return result;
       } catch (err) {
-        console.warn("Pose detection error:", err);
+        console.error("[RehabLens] Pose detection error:", err);
         return null;
       }
     },
@@ -148,9 +167,13 @@ export function usePoseDetection(): UsePoseDetectionReturn {
 
   const startDetectionLoop = useCallback(
     (video: HTMLVideoElement, onPose: (pose: PoseResult) => void) => {
-      if (isDetectingRef.current) return;
+      if (isDetectingRef.current) {
+        console.warn("[RehabLens] Detection already running, skipping");
+        return undefined;
+      }
       isDetectingRef.current = true;
       setIsDetecting(true);
+      console.log("[RehabLens] Detection loop started");
 
       let running = true;
 
@@ -164,7 +187,7 @@ export function usePoseDetection(): UsePoseDetectionReturn {
 
         // ~15fps for performance
         if (running) {
-          animFrameRef.current = setTimeout(loop, 66) as unknown as number;
+          animFrameRef.current = setTimeout(loop, 66);
         }
       };
 
@@ -172,9 +195,11 @@ export function usePoseDetection(): UsePoseDetectionReturn {
 
       // Store cleanup function
       return () => {
+        console.log("[RehabLens] Detection loop stopped");
         running = false;
         if (animFrameRef.current) {
-          clearTimeout(animFrameRef.current as unknown as number);
+          clearTimeout(animFrameRef.current);
+          animFrameRef.current = null;
         }
         isDetectingRef.current = false;
         setIsDetecting(false);
@@ -185,8 +210,10 @@ export function usePoseDetection(): UsePoseDetectionReturn {
 
   const stopDetectionLoop = useCallback(() => {
     if (animFrameRef.current) {
-      clearTimeout(animFrameRef.current as unknown as number);
+      clearTimeout(animFrameRef.current);
+      animFrameRef.current = null;
     }
+    isDetectingRef.current = false;
     setIsDetecting(false);
   }, []);
 
